@@ -1,0 +1,160 @@
+Berikut contoh script T‑SQL lengkap untuk 1 job yang menjalankan 3 stored procedure (TUHCO, TPOLW, FIA) secara berurutan, dengan schedule 06:00, 10:00, 14:00, 18:00 setiap hari.
+
+Silakan sesuaikan nama database dan nama SP jika berbeda.
+
+sql
+USE msdb;
+GO
+
+------------------------------------------------------------
+-- 1) BUAT JOB
+------------------------------------------------------------
+EXEC sp_add_job
+    @job_name   = N'JOB_DWH_4Times',
+    @enabled    = 1,
+    @description = N'Job DWH: TUHCO, TPOLW, FIA dijalankan 4x sehari (06,10,14,18)';
+GO
+
+------------------------------------------------------------
+-- 2) STEP 1: TUHCO (2 juta data)
+------------------------------------------------------------
+EXEC sp_add_jobstep
+    @job_name   = N'JOB_DWH_4Times',
+    @step_name  = N'Step 1 - usp_Migrate_TUHCO_Fast',
+    @subsystem  = N'TSQL',
+    @database_name = N'DWH_PROD',      -- GANTI ke nama database Anda
+    @command    = N'EXEC dbo.usp_Migrate_TUHCO_Fast @MaxDOP = 8;',
+    @on_success_action = 3,            -- 3 = Go to next step
+    @on_fail_action    = 2;            -- 2 = Quit with failure
+GO
+
+------------------------------------------------------------
+-- 3) STEP 2: TPOLW (3 juta data)
+------------------------------------------------------------
+EXEC sp_add_jobstep
+    @job_name   = N'JOB_DWH_4Times',
+    @step_name  = N'Step 2 - usp_MigratePolicyWritingAgentShare_HighPerformance',
+    @subsystem  = N'TSQL',
+    @database_name = N'DWH_PROD',      -- GANTI ke nama database Anda
+    @command    = N'EXEC dbo.usp_MigratePolicyWritingAgentShare_HighPerformance @MaxDOP = 8;',
+    @on_success_action = 3,            -- Go to next step
+    @on_fail_action    = 2;            -- Quit with failure
+GO
+
+------------------------------------------------------------
+-- 4) STEP 3: FIA (5 juta data)
+------------------------------------------------------------
+EXEC sp_add_jobstep
+    @job_name   = N'JOB_DWH_4Times',
+    @step_name  = N'Step 3 - usp_MigrateFIA_HighPerformance',
+    @subsystem  = N'TSQL',
+    @database_name = N'DWH_PROD',      -- GANTI ke nama database Anda
+    @command    = N'EXEC dbo.usp_MigrateFIA_HighPerformance @MaxDOP = 8;',
+    @on_success_action = 1,            -- 1 = Quit with success
+    @on_fail_action    = 2;            -- Quit with failure
+GO
+
+------------------------------------------------------------
+-- 5) SCHEDULE: 06:00, 10:00, 14:00, 18:00 SETIAP HARI
+--   (tiap 4 jam mulai 06:00)
+------------------------------------------------------------
+EXEC sp_add_schedule
+    @schedule_name = N'SCH_DWH_6_10_14_18',
+    @freq_type = 4,                -- 4 = daily
+    @freq_interval = 1,            -- setiap 1 hari
+    @freq_subday_type = 8,         -- 8 = hours
+    @freq_subday_interval = 4,     -- tiap 4 jam
+    @active_start_time = 60000,    -- 06:00:00 (format HHMMSS)
+    @active_start_date = 20260225; -- GANTI ke tanggal mulai (YYYYMMDD)
+GO
+
+EXEC sp_attach_schedule
+    @job_name = N'JOB_DWH_4Times',
+    @schedule_name = N'SCH_DWH_6_10_14_18';
+GO
+
+------------------------------------------------------------
+-- 6) HUBUNGKAN JOB KE SERVER INI
+------------------------------------------------------------
+EXEC sp_add_jobserver
+    @job_name = N'JOB_DWH_4Times',
+    @server_name = N'(local)';      -- atau nama instance, mis: N'SRVSQLPROD01'
+GO
+Catatan penting:
+
+Ganti DWH_PROD dengan nama database tempat stored procedure berada.
+
+Pastikan ketiga SP sudah ada dan bisa di‑EXEC tanpa error.
+
+SQL Server Agent harus dalam status Started supaya job jalan otomatis.
+
+Setelah menjalankan script di atas, Anda bisa uji manual di SSMS: SQL Server Agent → Jobs → klik kanan JOB_DWH_4Times → Start Job at Step... → pilih Step 1.
+
+Perlu saya buatkan juga versi script yang sama tetapi untuk environment DWH_TEST (uji coba) sebelum di‑deploy ke PROD?
+
+
+USE msdb;
+GO
+
+------------------------------------------------------------
+-- JOB UNTUK DWH_TEST
+------------------------------------------------------------
+EXEC sp_add_job
+    @job_name    = N'JOB_DWH_4Times_TEST',
+    @enabled     = 1,
+    @description = N'JOB TEST DWH: TUHCO, TPOLW, FIA dijalankan 4x sehari (06,10,14,18) di DWH_TEST';
+GO
+
+-- STEP 1: TUHCO (TEST)
+EXEC sp_add_jobstep
+    @job_name        = N'JOB_DWH_4Times_TEST',
+    @step_name       = N'Step 1 - usp_Migrate_TUHCO_Fast (TEST)',
+    @subsystem       = N'TSQL',
+    @database_name   = N'DWH_TEST',      -- DB TEST
+    @command         = N'EXEC dbo.usp_Migrate_TUHCO_Fast @MaxDOP = 8;',
+    @on_success_action = 3,              -- Go to next step
+    @on_fail_action    = 2;              -- Quit with failure
+GO
+
+-- STEP 2: TPOLW (TEST)
+EXEC sp_add_jobstep
+    @job_name        = N'JOB_DWH_4Times_TEST',
+    @step_name       = N'Step 2 - usp_MigratePolicyWritingAgentShare_HighPerformance (TEST)',
+    @subsystem       = N'TSQL',
+    @database_name   = N'DWH_TEST',
+    @command         = N'EXEC dbo.usp_MigratePolicyWritingAgentShare_HighPerformance @MaxDOP = 8;',
+    @on_success_action = 3,
+    @on_fail_action    = 2;
+GO
+
+-- STEP 3: FIA (TEST)
+EXEC sp_add_jobstep
+    @job_name        = N'JOB_DWH_4Times_TEST',
+    @step_name       = N'Step 3 - usp_MigrateFIA_HighPerformance (TEST)',
+    @subsystem       = N'TSQL',
+    @database_name   = N'DWH_TEST',
+    @command         = N'EXEC dbo.usp_MigrateFIA_HighPerformance @MaxDOP = 8;',
+    @on_success_action = 1,              -- Quit with success
+    @on_fail_action    = 2;
+GO
+
+-- SCHEDULE TEST: 06:00, 10:00, 14:00, 18:00
+EXEC sp_add_schedule
+    @schedule_name       = N'SCH_DWH_6_10_14_18_TEST',
+    @freq_type           = 4,           -- daily
+    @freq_interval       = 1,
+    @freq_subday_type    = 8,           -- hours
+    @freq_subday_interval = 4,          -- setiap 4 jam
+    @active_start_time   = 60000,       -- 06:00:00
+    @active_start_date   = 20260225;    -- GANTI jika perlu
+GO
+
+EXEC sp_attach_schedule
+    @job_name      = N'JOB_DWH_4Times_TEST',
+    @schedule_name = N'SCH_DWH_6_10_14_18_TEST';
+GO
+
+EXEC sp_add_jobserver
+    @job_name    = N'JOB_DWH_4Times_TEST',
+    @server_name = N'(local)';          -- atau nama instance test
+GO
