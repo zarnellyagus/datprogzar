@@ -1,0 +1,270 @@
+USE msdb;
+GO
+
+/* 1) BUAT JOB */
+EXEC sp_add_job
+    @job_name     = N'JOB_SYNC_POLIS',
+    @enabled      = 1,
+    @description  = N'Job sync polis: target runtime < 10 detik';
+GO
+
+/* 2) STEP 1: TPOL */
+EXEC sp_add_jobstep
+    @job_name          = N'JOB_SYNC_POLIS',
+    @step_name         = N'Step 1 - TPOL',
+    @subsystem         = N'TSQL',
+    @database_name     = N'NDIBORD33',  -- ganti sesuai DB Anda
+    @command           = N'EXEC dbo.sp_Sync_TPOL @MaxDOP = 8;',
+    @on_success_action = 3,             -- Go to next step
+    @on_fail_action    = 2;             -- Quit with failure
+GO
+
+/* 3) STEP 2: TPOLC */
+EXEC sp_add_jobstep
+    @job_name          = N'JOB_SYNC_POLIS',
+    @step_name         = N'Step 2 - TPOLC',
+    @subsystem         = N'TSQL',
+    @database_name     = N'NDIBORD33',
+    @command           = N'EXEC dbo.sp_Sync_TPOLC @MaxDOP = 8;',
+    @on_success_action = 3,
+    @on_fail_action    = 2;
+GO
+
+/* 4) STEP 3: TPOLW */
+EXEC sp_add_jobstep
+    @job_name          = N'JOB_SYNC_POLIS',
+    @step_name         = N'Step 3 - TPOLW',
+    @subsystem         = N'TSQL',
+    @database_name     = N'NDIBORD33',
+    @command           = N'EXEC dbo.sp_sync_TPOLW @MaxDOP = 8;',
+    @on_success_action = 3,
+    @on_fail_action    = 2;
+GO
+
+/* 5) STEP 4: BankAccount */
+EXEC sp_add_jobstep
+    @job_name          = N'JOB_SYNC_POLIS',
+    @step_name         = N'Step 4 - BankAccount',
+    @subsystem         = N'TSQL',
+    @database_name     = N'NDIBORD33',
+    @command           = N'EXEC dbo.sp_Sync_BankAccount @MaxDOP = 8;',
+    @on_success_action = 3,
+    @on_fail_action    = 2;
+GO
+
+/* 6) STEP 5: ClientCreditCard */
+EXEC sp_add_jobstep
+    @job_name          = N'JOB_SYNC_POLIS',
+    @step_name         = N'Step 5 - ClientCreditCard',
+    @subsystem         = N'TSQL',
+    @subsystem         = N'TSQL',
+    @database_name     = N'NDIBORD33',
+    @command           = N'EXEC dbo.sp_sync_ClientCreditCard @MaxDOP = 8;',
+    @on_success_action = 3,
+    @on_fail_action    = 2;
+GO
+
+/* 7) STEP 6: TBENE */
+EXEC sp_add_jobstep
+    @job_name          = N'JOB_SYNC_POLIS',
+    @step_name         = N'Step 6 - TBENE',
+    @subsystem         = N'TSQL',
+    @database_name     = N'NDIBORD33',
+    @command           = N'EXEC dbo.sp_sync_TBENE @MaxDOP = 8;',
+    @on_success_action = 3,
+    @on_fail_action    = 2;
+GO
+
+/* 8) STEP 7: TCDSA */
+EXEC sp_add_jobstep
+    @job_name          = N'JOB_SYNC_POLIS',
+    @step_name         = N'Step 7 - TCDSA',
+    @subsystem         = N'TSQL',
+    @database_name     = N'NDIBORD33',
+    @command           = N'EXEC dbo.sp_sync_TCDSA @MaxDOP = 8;',
+    @on_success_action = 3,
+    @on_fail_action    = 2;
+GO
+
+/* 9) STEP 8: TCLIA */
+EXEC sp_add_jobstep
+    @job_name          = N'JOB_SYNC_POLIS',
+    @step_name         = N'Step 8 - TCLIA',
+    @subsystem         = N'TSQL',
+    @database_name     = N'NDIBORD33',
+    @command           = N'EXEC dbo.SP_Sync_TCLIA @MaxDOP = 8;',
+    @on_success_action = 3,
+    @on_fail_action    = 2;
+GO
+
+/* 10) STEP 9: TCLIB */
+EXEC sp_add_jobstep
+    @job_name          = N'JOB_SYNC_POLIS',
+    @step_name         = N'Step 9 - TCLIB',
+    @subsystem         = N'TSQL',
+    @database_name     = N'NDIBORD33',
+    @command           = N'EXEC dbo.sp_Sync_TCLIB @MaxDOP = 8;',
+    @on_success_action = 3,
+    @on_fail_action    = 2;
+GO
+
+/* 11) STEP 10: TCLIC */
+EXEC sp_add_jobstep
+    @job_name          = N'JOB_SYNC_POLIS',
+    @step_name         = N'Step 10 - TCLIC',
+    @subsystem         = N'TSQL',
+    @database_name     = N'NDIBORD33',
+    @command           = N'EXEC dbo.SP_Sync_TCLIC @MaxDOP = 8;',
+    @on_success_action = 3,
+    @on_fail_action    = 2;
+GO
+
+/* 12) STEP 11: TCLNM */
+EXEC sp_add_jobstep
+    @job_name          = N'JOB_SYNC_POLIS',
+    @step_name         = N'Step 11 - TCLNM',
+    @subsystem         = N'TSQL',
+    @database_name     = N'NDIBORD33',
+    @command           = N'EXEC dbo.sp_Sync_TCLNM @MaxDOP = 8;',
+    @on_success_action = 3,
+    @on_fail_action    = 2;
+GO
+
+/* 13) STEP 12: TFD */
+EXEC sp_add_jobstep
+    @job_name          = N'JOB_SYNC_POLIS',
+    @step_name         = N'Step 12 - TFD',
+    @subsystem         = N'TSQL',
+    @database_name     = N'NDIBORD33',
+    @command           = N'EXEC dbo.sp_Sync_TFD @MaxDOP = 8;',
+    @on_success_action = 3,
+    @on_fail_action    = 2;
+GO
+
+/* 14) STEP 13: TPV */
+EXEC sp_add_jobstep
+    @job_name          = N'JOB_SYNC_POLIS',
+    @step_name         = N'Step 13 - TPV',
+    @subsystem         = N'TSQL',
+    @database_name     = N'NDIBORD33',
+    @command           = N'EXEC dbo.sp_Sync_TPV @MaxDOP = 8;',
+    @on_success_action = 3,
+    @on_fail_action    = 2;
+GO
+
+/* 15) STEP 14: TRSTB */
+EXEC sp_add_jobstep
+    @job_name          = N'JOB_SYNC_POLIS',
+    @step_name         = N'Step 14 - TRSTB',
+    @subsystem         = N'TSQL',
+    @database_name     = N'NDIBORD33',
+    -- kalau bisa rename SP jadi tanpa spasi, misal sp_Sync_TRSTB
+    @command           = N'EXEC dbo.[Sp Sync TRSTB] @MaxDOP = 8;',
+    @on_success_action = 3,
+    @on_fail_action    = 2;
+GO
+
+/* 16) STEP 15: TUHCO */
+EXEC sp_add_jobstep
+    @job_name          = N'JOB_SYNC_POLIS',
+    @step_name         = N'Step 15 - TUHCO',
+    @subsystem         = N'TSQL',
+    @database_name     = N'NDIBORD33',
+    @command           = N'EXEC dbo.sp_Sync_TUHCO @MaxDOP = 8;',
+    @on_success_action = 3,
+    @on_fail_action    = 2;
+GO
+
+/* 17) STEP 16: TCRCD */
+EXEC sp_add_jobstep
+    @job_name          = N'JOB_SYNC_POLIS',
+    @step_name         = N'Step 16 - TCRCD',
+    @subsystem         = N'TSQL',
+    @database_name     = N'NDIBORD33',
+    @command           = N'EXEC dbo.SP_Syns_TCRCD @MaxDOP = 8;',
+    @on_success_action = 3,
+    @on_fail_action    = 2;
+GO
+
+/* 18) STEP 17: CIA (STEP TERAKHIR) */
+EXEC sp_add_jobstep
+    @job_name          = N'JOB_SYNC_POLIS',
+    @step_name         = N'Step 17 - CIA',
+    @subsystem         = N'TSQL',
+    @database_name     = N'NDIBORD33',
+    @command           = N'EXEC dbo.SP_Sysnc_CIA @MaxDOP = 8;',
+    @on_success_action = 1,   -- Quit with success
+    @on_fail_action    = 2;   -- Quit with failure
+GO
+
+/* 19) SCHEDULE 09:00, 12:00, 15:00, 17:00 (SETIAP HARI) */
+
+-- 09:00
+EXEC sp_add_schedule
+    @schedule_name        = N'SCHED_JOB_SYNC_POLIS_0900',
+    @enabled              = 1,
+    @freq_type            = 4,       -- daily
+    @freq_interval        = 1,
+    @freq_subday_type     = 1,       -- once
+    @freq_subday_interval = 1,
+    @active_start_time    = 090000;  -- 09:00:00
+GO
+
+EXEC sp_attach_schedule
+    @job_name      = N'JOB_SYNC_POLIS',
+    @schedule_name = N'SCHED_JOB_SYNC_POLIS_0900';
+GO
+
+-- 12:00
+EXEC sp_add_schedule
+    @schedule_name        = N'SCHED_JOB_SYNC_POLIS_1200',
+    @enabled              = 1,
+    @freq_type            = 4,
+    @freq_interval        = 1,
+    @freq_subday_type     = 1,
+    @freq_subday_interval = 1,
+    @active_start_time    = 120000;  -- 12:00:00
+GO
+
+EXEC sp_attach_schedule
+    @job_name      = N'JOB_SYNC_POLIS',
+    @schedule_name = N'SCHED_JOB_SYNC_POLIS_1200';
+GO
+
+-- 15:00
+EXEC sp_add_schedule
+    @schedule_name        = N'SCHED_JOB_SYNC_POLIS_1500',
+    @enabled              = 1,
+    @freq_type            = 4,
+    @freq_interval        = 1,
+    @freq_subday_type     = 1,
+    @freq_subday_interval = 1,
+    @active_start_time    = 150000;  -- 15:00:00
+GO
+
+EXEC sp_attach_schedule
+    @job_name      = N'JOB_SYNC_POLIS',
+    @schedule_name = N'SCHED_JOB_SYNC_POLIS_1500';
+GO
+
+-- 17:00
+EXEC sp_add_schedule
+    @schedule_name        = N'SCHED_JOB_SYNC_POLIS_1700',
+    @enabled              = 1,
+    @freq_type            = 4,
+    @freq_interval        = 1,
+    @freq_subday_type     = 1,
+    @freq_subday_interval = 1,
+    @active_start_time    = 170000;  -- 17:00:00
+GO
+
+EXEC sp_attach_schedule
+    @job_name      = N'JOB_SYNC_POLIS',
+    @schedule_name = N'SCHED_JOB_SYNC_POLIS_1700';
+GO
+
+/* 20) DAFTARKAN JOB KE SERVER */
+EXEC sp_add_jobserver
+    @job_name    = N'JOB_SYNC_POLIS',
+    @server_name = N'(LOCAL)';
+GO
