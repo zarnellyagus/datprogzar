@@ -1,0 +1,238 @@
+-- =============================================
+-- INDEX PREREQ (jalankan sekali sebelum SP)
+-- =============================================
+
+-- STAGING: Heap dulu saat load, baru buat index setelah insert
+-- FACT: Clustered index pada composite key
+CREATE CLUSTERED INDEX IX_DWT_TUHCO_SF_Key
+ON DWT_TUHCO_SF (CO_ID, POL_ID, MTHV_EFF_DT_NUM, CVG_NUM);
+
+-- Untuk MERGE di Phase 2-3, tambahkan ini di staging SETELAH Phase 1 selesai
+-- (dibuat dinamis di dalam SP)
+
+-- =============================================
+-- STORED PROCEDURE
+-- =============================================
+CREATE OR ALTER PROCEDURE usp_Migrate_TUHCO_Fast
+    @BatchSize  INT = 500000,   -- chunk size untuk MERGE
+    @MaxDOP     INT = 8
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+    -- Aktifkan trace flag untuk bulk insert performa maksimal
+    -- DBCC TRACEON(610, -1);  -- minimal logging on indexed tables (Enterprise only)
+
+    DECLARE @StartTime  DATETIME2(3) = SYSUTCDATETIME();
+    DECLARE @StepTime   DATETIME2(3);
+    DECLARE @RowCounts  TABLE (Phase NVARCHAR(100), RowCount BIGINT, DurationMs BIGINT);
+    DECLARE @RC         BIGINT;
+
+    BEGIN TRY
+
+        -- ============================================
+        -- PHASE 1: TRUNCATE + BULK LOAD STAGING (HEAP)
+        -- Target: minimal logging, no index overhead saat insert
+        -- ============================================
+        PRINT 'Phase 1: TRUNCATE & BULK LOAD SI_TUHCO_SF (as HEAP)...';
+        SET @StepTime = SYSUTCDATETIME();
+
+        -- Drop clustered index staging dulu agar load ke HEAP (jauh lebih cepat)
+        IF EXISTS (
+            SELECT 1 FROM sys.indexes 
+            WHERE object_id = OBJECT_ID('SI_TUHCO_SF') 
+              AND name = 'IX_SI_TUHCO_SF_Key'
+        )
+            DROP INDEX IX_SI_TUHCO_SF_Key ON SI_TUHCO_SF;
+
+        TRUNCATE TABLE SI_TUHCO_SF;
+
+        -- Bulk insert ke HEAP + TABLOCKX = minimal logging
+        INSERT INTO SI_TUHCO_SF WITH (TABLOCKX)
+        (
+            CO_ID, POL_ID, MTHV_EFF_DT_NUM, CVG_NUM,
+            CVG_SUM_INS_AMT, MTHV_CVG_NAR_AMT, CVG_GUAR_COI_AMT,
+            STD_MORT_CHRG_AMT, CVG_BNFT_CHRG_AMT, SSTD_MORT_CHRG_AMT,
+            CVG_PERI_LOAD_AMT, MTHV_CVG_SHRT_AMT
+        )
+        SELECT
+            CO_ID, POL_ID, MTHV_EFF_DT_NUM, CVG_NUM,
+            CVG_SUM_INS_AMT, MTHV_CVG_NAR_AMT, CVG_GUAR_COI_AMT,
+            STD_MORT_CHRG_AMT, CVG_BNFT_CHRG_AMT, SSTD_MORT_CHRG_AMT,
+            CVG_PERI_LOAD_AMT, MTHV_CVG_SHRT_AMT
+        FROM OPENQUERY([UDING602_SV80621],
+            'SELECT CO_ID, POL_ID, MTHV_EFF_DT_NUM, CVG_NUM,
+                    CVG_SUM_INS_AMT, MTHV_CVG_NAR_AMT, CVG_GUAR_COI_AMT,
+                    STD_MORT_CHRG_AMT, CVG_BNFT_CHRG_AMT, SSTD_MORT_CHRG_AMT,
+                    CVG_PERI_LOAD_AMT, MTHV_CVG_SHRT_AMT
+             FROM UDING602.TUHCO WITH UR'
+        )
+        OPTION (MAXDOP 8, RECOMPILE);
+
+        SET @RC = @@ROWCOUNT;
+        INSERT INTO @RowCounts VALUES ('Phase 1 - Staging Load', @RC, DATEDIFF(ms, @StepTime, SYSUTCDATETIME()));
+        PRINT 'Phase 1 done: ' + CAST(@RC AS VARCHAR(20)) + ' rows | ' 
+              + CAST(DATEDIFF(ms, @StepTime, SYSUTCDATETIME()) AS VARCHAR(10)) + ' ms';
+
+        -- ============================================
+        -- PHASE 1b: BUILD CLUSTERED INDEX ON STAGING
+        -- Sort once, join fast di phase berikutnya
+        -- ============================================
+        PRINT 'Phase 1b: Build clustered index on staging...';
+        SET @StepTime = SYSUTCDATETIME();
+
+        CREATE CLUSTERED INDEX IX_SI_TUHCO_SF_Key
+        ON SI_TUHCO_SF (CO_ID, POL_ID, MTHV_EFF_DT_NUM, CVG_NUM)
+        WITH (SORT_IN_TEMPDB = ON, MAXDOP = 8, DATA_COMPRESSION = PAGE);
+
+        INSERT INTO @RowCounts VALUES ('Phase 1b - Build Staging Index', 0, DATEDIFF(ms, @StepTime, SYSUTCDATETIME()));
+        PRINT 'Phase 1b done: ' + CAST(DATEDIFF(ms, @StepTime, SYSUTCDATETIME()) AS VARCHAR(10)) + ' ms';
+
+        -- ============================================
+        -- PHASE 2: DISABLE NC INDEXES PADA FACT
+        -- Kurangi overhead write saat update/insert massal
+        -- ============================================
+        PRINT 'Phase 2: Disable nonclustered indexes on DWT_TUHCO_SF...';
+        SET @StepTime = SYSUTCDATETIME();
+
+        -- Disable semua NC index (bukan clustered)
+        DECLARE @sql NVARCHAR(MAX) = N'';
+        SELECT @sql += N'ALTER INDEX ' + QUOTENAME(i.name) 
+                     + N' ON DWT_TUHCO_SF DISABLE;' + CHAR(13)
+        FROM sys.indexes i
+        WHERE i.object_id = OBJECT_ID('DWT_TUHCO_SF')
+          AND i.type_desc = 'NONCLUSTERED'
+          AND i.is_disabled = 0;
+
+        IF LEN(@sql) > 0
+            EXEC sp_executesql @sql;
+
+        INSERT INTO @RowCounts VALUES ('Phase 2 - Disable NC Indexes', 0, DATEDIFF(ms, @StepTime, SYSUTCDATETIME()));
+
+        -- ============================================
+        -- PHASE 3: MERGE (UPDATE + INSERT sekaligus)
+        -- Lebih efisien dari UPDATE + INSERT terpisah
+        -- karena cukup 1x scan join
+        -- ============================================
+        PRINT 'Phase 3: MERGE into DWT_TUHCO_SF...';
+        SET @StepTime = SYSUTCDATETIME();
+
+        DECLARE @MergeUpdated BIGINT = 0;
+        DECLARE @MergeInserted BIGINT = 0;
+        DECLARE @MergeOutput TABLE (
+            Action NVARCHAR(10)
+        );
+
+        MERGE DWT_TUHCO_SF WITH (HOLDLOCK, TABLOCK) AS F
+        USING SI_TUHCO_SF AS S
+            ON  F.CO_ID           = S.CO_ID
+            AND F.POL_ID          = S.POL_ID
+            AND F.MTHV_EFF_DT_NUM = S.MTHV_EFF_DT_NUM
+            AND F.CVG_NUM         = S.CVG_NUM
+
+        WHEN MATCHED AND (
+            -- Gunakan hash checksum untuk perbandingan cepat
+            CHECKSUM(
+                F.CVG_SUM_INS_AMT, F.MTHV_CVG_NAR_AMT, F.CVG_GUAR_COI_AMT,
+                F.STD_MORT_CHRG_AMT, F.CVG_BNFT_CHRG_AMT, F.SSTD_MORT_CHRG_AMT,
+                F.CVG_PERI_LOAD_AMT, F.MTHV_CVG_SHRT_AMT
+            ) <>
+            CHECKSUM(
+                S.CVG_SUM_INS_AMT, S.MTHV_CVG_NAR_AMT, S.CVG_GUAR_COI_AMT,
+                S.STD_MORT_CHRG_AMT, S.CVG_BNFT_CHRG_AMT, S.SSTD_MORT_CHRG_AMT,
+                S.CVG_PERI_LOAD_AMT, S.MTHV_CVG_SHRT_AMT
+            )
+        ) THEN UPDATE SET
+            F.CVG_SUM_INS_AMT    = S.CVG_SUM_INS_AMT,
+            F.MTHV_CVG_NAR_AMT   = S.MTHV_CVG_NAR_AMT,
+            F.CVG_GUAR_COI_AMT   = S.CVG_GUAR_COI_AMT,
+            F.STD_MORT_CHRG_AMT  = S.STD_MORT_CHRG_AMT,
+            F.CVG_BNFT_CHRG_AMT  = S.CVG_BNFT_CHRG_AMT,
+            F.SSTD_MORT_CHRG_AMT = S.SSTD_MORT_CHRG_AMT,
+            F.CVG_PERI_LOAD_AMT  = S.CVG_PERI_LOAD_AMT,
+            F.MTHV_CVG_SHRT_AMT  = S.MTHV_CVG_SHRT_AMT
+
+        WHEN NOT MATCHED BY TARGET THEN INSERT
+        (
+            CO_ID, POL_ID, MTHV_EFF_DT_NUM, CVG_NUM,
+            CVG_SUM_INS_AMT, MTHV_CVG_NAR_AMT, CVG_GUAR_COI_AMT,
+            STD_MORT_CHRG_AMT, CVG_BNFT_CHRG_AMT, SSTD_MORT_CHRG_AMT,
+            CVG_PERI_LOAD_AMT, MTHV_CVG_SHRT_AMT
+        )
+        VALUES (
+            S.CO_ID, S.POL_ID, S.MTHV_EFF_DT_NUM, S.CVG_NUM,
+            S.CVG_SUM_INS_AMT, S.MTHV_CVG_NAR_AMT, S.CVG_GUAR_COI_AMT,
+            S.STD_MORT_CHRG_AMT, S.CVG_BNFT_CHRG_AMT, S.SSTD_MORT_CHRG_AMT,
+            S.CVG_PERI_LOAD_AMT, S.MTHV_CVG_SHRT_AMT
+        )
+
+        OUTPUT $action INTO @MergeOutput(Action)
+
+        OPTION (MAXDOP 8, RECOMPILE);
+
+        SELECT 
+            @MergeUpdated  = SUM(CASE WHEN Action = 'UPDATE' THEN 1 ELSE 0 END),
+            @MergeInserted = SUM(CASE WHEN Action = 'INSERT' THEN 1 ELSE 0 END)
+        FROM @MergeOutput;
+
+        INSERT INTO @RowCounts VALUES ('Phase 3 - Merge Updated', @MergeUpdated, 0);
+        INSERT INTO @RowCounts VALUES ('Phase 3 - Merge Inserted', @MergeInserted, DATEDIFF(ms, @StepTime, SYSUTCDATETIME()));
+        PRINT 'Phase 3 done: Updated=' + CAST(@MergeUpdated AS VARCHAR(20)) 
+              + ' | Inserted=' + CAST(@MergeInserted AS VARCHAR(20)) 
+              + ' | ' + CAST(DATEDIFF(ms, @StepTime, SYSUTCDATETIME()) AS VARCHAR(10)) + ' ms';
+
+        -- ============================================
+        -- PHASE 4: REBUILD NC INDEXES
+        -- ============================================
+        PRINT 'Phase 4: Rebuild nonclustered indexes...';
+        SET @StepTime = SYSUTCDATETIME();
+
+        SET @sql = N'';
+        SELECT @sql += N'ALTER INDEX ' + QUOTENAME(i.name)
+                     + N' ON DWT_TUHCO_SF REBUILD WITH (MAXDOP = 8, DATA_COMPRESSION = PAGE);' + CHAR(13)
+        FROM sys.indexes i
+        WHERE i.object_id = OBJECT_ID('DWT_TUHCO_SF')
+          AND i.type_desc = 'NONCLUSTERED'
+          AND i.is_disabled = 1;
+
+        IF LEN(@sql) > 0
+            EXEC sp_executesql @sql;
+
+        INSERT INTO @RowCounts VALUES ('Phase 4 - Rebuild NC Indexes', 0, DATEDIFF(ms, @StepTime, SYSUTCDATETIME()));
+        PRINT 'Phase 4 done: ' + CAST(DATEDIFF(ms, @StepTime, SYSUTCDATETIME()) AS VARCHAR(10)) + ' ms';
+
+        -- ============================================
+        -- SUMMARY
+        -- ============================================
+        DECLARE @TotalMs INT = DATEDIFF(ms, @StartTime, SYSUTCDATETIME());
+
+        PRINT '';
+        PRINT '========================================';
+        PRINT 'usp_Migrate_TUHCO_Fast SUMMARY';
+        PRINT '========================================';
+        SELECT Phase, RowCount, DurationMs FROM @RowCounts;
+        PRINT 'TOTAL DURATION: ' + CAST(@TotalMs AS VARCHAR(10)) + ' ms ('
+              + CAST(@TotalMs / 1000.0 AS VARCHAR(10)) + ' sec)';
+        PRINT '========================================';
+
+    END TRY
+    BEGIN CATCH
+        -- Pastikan NC index direstore meski error
+        SET @sql = N'';
+        SELECT @sql += N'ALTER INDEX ' + QUOTENAME(i.name)
+                     + N' ON DWT_TUHCO_SF REBUILD WITH (MAXDOP = 8);' + CHAR(13)
+        FROM sys.indexes i
+        WHERE i.object_id = OBJECT_ID('DWT_TUHCO_SF')
+          AND i.type_desc = 'NONCLUSTERED'
+          AND i.is_disabled = 1;
+
+        IF LEN(@sql) > 0
+            EXEC sp_executesql @sql;
+
+        PRINT 'ERROR at line ' + CAST(ERROR_LINE() AS VARCHAR(10)) + ': ' + ERROR_MESSAGE();
+        THROW;
+    END CATCH
+END;
+GO
