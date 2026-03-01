@@ -1,0 +1,179 @@
+CREATE OR ALTER PROCEDURE usp_Migrate_CIA_HighPerformance
+    @MaxDOP INT = 8
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+    DECLARE @StartTime  DATETIME2(3) = SYSDATETIME();
+    DECLARE @StepTime   DATETIME2(3);
+    DECLARE @RowCounts  TABLE (Phase NVARCHAR(50), RowCount INT, DurationMs INT);
+    DECLARE @RC         INT;
+
+    BEGIN TRY
+        --------------------------------------------------------
+        -- PHASE 1: BULK LOAD SI_TFA_SF (Minimal Logging)
+        -- Syarat minimal logging SQL Server 2016+:
+        --   • Target heap atau empty clustered index + TABLOCK
+        --   • FastLoadContext aktif by default (no TF610 needed)
+        --------------------------------------------------------
+        RAISERROR('Phase 1: TRUNCATE + BULK LOAD SI_TFA_SF...', 0, 1) WITH NOWAIT;
+        SET @StepTime = SYSDATETIME();
+
+        TRUNCATE TABLE SI_TFA_SF;   -- reset pages, no log overhead
+
+        INSERT INTO SI_TFA_SF WITH (TABLOCKX)   -- exclusive bulk lock → minimal logging
+        (
+            CO_ID, POL_ID, CVG_NUM, CIA_IDT_NUM, CIA_SEQ_NUM,
+            CIA_EFF_DT, CIA_TYP_CD,
+            CIA_CLI_TRXN_AMT, CIA_FND_TRXN_AMT, CIA_LOAD_AMT,
+            CIA_REVRS_PRCES_DT,
+            RowHashVal      -- kolom tambahan: CHECKSUM untuk delta detection
+        )
+        SELECT
+            CO_ID, POL_ID, CVG_NUM, CIA_IDT_NUM, CIA_SEQ_NUM,
+            CIA_EFF_DT, CIA_TYP_CD,
+            CIA_CLI_TRXN_AMT, CIA_FND_TRXN_AMT, CIA_LOAD_AMT,
+            CIA_REVRS_PRCES_DT,
+            -- CHECKSUM sebagai dirty/cheap hash — hindari update row yang tidak berubah
+            CHECKSUM(
+                CIA_EFF_DT, CIA_TYP_CD,
+                CIA_CLI_TRXN_AMT, CIA_FND_TRXN_AMT,
+                CIA_LOAD_AMT, CIA_REVRS_PRCES_DT
+            ) AS RowHashVal
+        FROM OPENQUERY([UDING602_SV80621],
+            'SELECT CO_ID, POL_ID, CVG_NUM, CIA_IDT_NUM, CIA_SEQ_NUM,
+                    CIA_EFF_DT, CIA_TYP_CD,
+                    CIA_CLI_TRXN_AMT, CIA_FND_TRXN_AMT,
+                    CIA_LOAD_AMT, CIA_REVRS_PRCES_DT
+             FROM UDING602.TFA WITH UR'
+        )
+        OPTION (MAXDOP 8, RECOMPILE);
+
+        SET @RC = @@ROWCOUNT;
+        INSERT INTO @RowCounts VALUES ('Staging Load', @RC, DATEDIFF(ms, @StepTime, SYSDATETIME()));
+        RAISERROR('Phase 1 done: %d rows', 0, 1, @RC) WITH NOWAIT;
+
+        --------------------------------------------------------
+        -- Pastikan index untuk Phase 2 & 3 ada di SI_TFA_SF
+        -- Jalankan SEKALI SAJA di luar SP:
+        --   CREATE INDEX IX_SI_TFA_SF_Key
+        --   ON SI_TFA_SF (CO_ID, POL_ID, CVG_NUM, CIA_IDT_NUM, CIA_SEQ_NUM)
+        --   INCLUDE (CIA_EFF_DT, CIA_TYP_CD, CIA_CLI_TRXN_AMT,
+        --            CIA_FND_TRXN_AMT, CIA_LOAD_AMT, CIA_REVRS_PRCES_DT, RowHashVal);
+        --
+        --   CREATE INDEX IX_DWT_CIA_SF_Key
+        --   ON DWT_CIA_SF (CO_ID, POL_ID, CVG_NUM, CIA_IDT_NUM, CIA_SEQ_NUM)
+        --   INCLUDE (...semua kolom update..., RowHashVal);
+        --------------------------------------------------------
+
+        --------------------------------------------------------
+        -- PHASE 2: UPDATE ONLY CHANGED ROWS (delta-aware)
+        -- Filter dengan CHECKSUM → skip rows yang identical
+        -- Jauh lebih cepat dari UPDATE semua matched rows
+        --------------------------------------------------------
+        RAISERROR('Phase 2: UPDATE changed rows in DWT_CIA_SF...', 0, 1) WITH NOWAIT;
+        SET @StepTime = SYSDATETIME();
+
+        UPDATE F
+        SET
+            F.CIA_EFF_DT         = S.CIA_EFF_DT,
+            F.CIA_TYP_CD         = S.CIA_TYP_CD,
+            F.CIA_CLI_TRXN_AMT   = S.CIA_CLI_TRXN_AMT,
+            F.CIA_FND_TRXN_AMT   = S.CIA_FND_TRXN_AMT,
+            F.CIA_LOAD_AMT       = S.CIA_LOAD_AMT,
+            F.CIA_REVRS_PRCES_DT = S.CIA_REVRS_PRCES_DT,
+            F.RowHashVal         = S.RowHashVal
+        FROM DWT_CIA_SF AS F
+        INNER JOIN SI_TFA_SF AS S
+            ON  F.CO_ID       = S.CO_ID
+            AND F.POL_ID      = S.POL_ID
+            AND F.CVG_NUM     = S.CVG_NUM
+            AND F.CIA_IDT_NUM = S.CIA_IDT_NUM
+            AND F.CIA_SEQ_NUM = S.CIA_SEQ_NUM
+        WHERE F.RowHashVal <> S.RowHashVal   -- ← KUNCI: hanya update yg benar-benar berubah
+        OPTION (MAXDOP 8, RECOMPILE);
+
+        SET @RC = @@ROWCOUNT;
+        INSERT INTO @RowCounts VALUES ('Update Fact', @RC, DATEDIFF(ms, @StepTime, SYSDATETIME()));
+        RAISERROR('Phase 2 done: %d rows updated', 0, 1, @RC) WITH NOWAIT;
+
+        --------------------------------------------------------
+        -- PHASE 3: INSERT NEW ROWS (LEFT JOIN IS NULL lebih cepat dari NOT EXISTS)
+        -- LEFT JOIN + IS NULL → Hash Join plan (bukan Nested Loop)
+        --------------------------------------------------------
+        RAISERROR('Phase 3: INSERT new rows into DWT_CIA_SF...', 0, 1) WITH NOWAIT;
+        SET @StepTime = SYSDATETIME();
+
+        INSERT INTO DWT_CIA_SF WITH (TABLOCKX)
+        (
+            CO_ID, POL_ID, CVG_NUM, CIA_IDT_NUM, CIA_SEQ_NUM,
+            CIA_EFF_DT, CIA_TYP_CD,
+            CIA_CLI_TRXN_AMT, CIA_FND_TRXN_AMT, CIA_LOAD_AMT,
+            CIA_REVRS_PRCES_DT, RowHashVal
+        )
+        SELECT
+            S.CO_ID, S.POL_ID, S.CVG_NUM, S.CIA_IDT_NUM, S.CIA_SEQ_NUM,
+            S.CIA_EFF_DT, S.CIA_TYP_CD,
+            S.CIA_CLI_TRXN_AMT, S.CIA_FND_TRXN_AMT, S.CIA_LOAD_AMT,
+            S.CIA_REVRS_PRCES_DT, S.RowHashVal
+        FROM SI_TFA_SF AS S
+        LEFT JOIN DWT_CIA_SF AS F
+            ON  F.CO_ID       = S.CO_ID
+            AND F.POL_ID      = S.POL_ID
+            AND F.CVG_NUM     = S.CVG_NUM
+            AND F.CIA_IDT_NUM = S.CIA_IDT_NUM
+            AND F.CIA_SEQ_NUM = S.CIA_SEQ_NUM
+        WHERE F.CO_ID IS NULL   -- ← row baru yang belum ada di fact
+        OPTION (MAXDOP 8, RECOMPILE, HASH JOIN);
+
+        SET @RC = @@ROWCOUNT;
+        INSERT INTO @RowCounts VALUES ('Insert Fact', @RC, DATEDIFF(ms, @StepTime, SYSDATETIME()));
+        RAISERROR('Phase 3 done: %d rows inserted', 0, 1, @RC) WITH NOWAIT;
+
+        --------------------------------------------------------
+        -- SUMMARY
+        --------------------------------------------------------
+        DECLARE @TotalMs   INT = DATEDIFF(ms, @StartTime, SYSDATETIME());
+        DECLARE @TotalRows INT = (SELECT SUM(RowCount) FROM @RowCounts);
+
+        SELECT Phase, RowCount, DurationMs,
+               CAST(DurationMs / 1000.0 AS DECIMAL(10,2)) AS DurationSec
+        FROM @RowCounts
+        UNION ALL
+        SELECT 'TOTAL', @TotalRows, @TotalMs,
+               CAST(@TotalMs / 1000.0 AS DECIMAL(10,2));
+
+        IF @TotalMs > 10000
+            RAISERROR('WARNING: Target <10s TIDAK tercapai! Actual: %d ms', 0, 1, @TotalMs) WITH NOWAIT;
+        ELSE
+            RAISERROR('SUCCESS: Target <10s TERCAPAI! Actual: %d ms', 0, 1, @TotalMs) WITH NOWAIT;
+
+    END TRY
+    BEGIN CATCH
+        RAISERROR('ERROR at Line %d: %s', 16, 1, ERROR_LINE(), ERROR_MESSAGE());
+        THROW;
+    END CATCH
+END;
+GO
+
+
+-- 1. Tambah kolom RowHashVal ke kedua tabel (jika belum ada)
+ALTER TABLE SI_TFA_SF   ADD RowHashVal INT NULL;
+ALTER TABLE DWT_CIA_SF  ADD RowHashVal INT NULL;
+
+-- 2. Index komposit di staging (dibuat SETELAH bulk load lebih cepat)
+--    Atau buat sebagai non-clustered pada tabel staging heap
+CREATE INDEX IX_SI_TFA_SF_Key
+ON SI_TFA_SF (CO_ID, POL_ID, CVG_NUM, CIA_IDT_NUM, CIA_SEQ_NUM)
+INCLUDE (CIA_EFF_DT, CIA_TYP_CD, CIA_CLI_TRXN_AMT,
+         CIA_FND_TRXN_AMT, CIA_LOAD_AMT, CIA_REVRS_PRCES_DT, RowHashVal)
+WITH (SORT_IN_TEMPDB = ON, MAXDOP = 8);
+
+-- 3. Index di fact table — pastikan covering index ada
+CREATE INDEX IX_DWT_CIA_SF_Key
+ON DWT_CIA_SF (CO_ID, POL_ID, CVG_NUM, CIA_IDT_NUM, CIA_SEQ_NUM)
+INCLUDE (CIA_EFF_DT, CIA_TYP_CD, CIA_CLI_TRXN_AMT,
+         CIA_FND_TRXN_AMT, CIA_LOAD_AMT, CIA_REVRS_PRCES_DT, RowHashVal)
+WITH (SORT_IN_TEMPDB = ON, MAXDOP = 8);
