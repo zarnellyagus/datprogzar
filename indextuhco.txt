@@ -1,0 +1,146 @@
+-- =============================================
+-- DWT_TUHCO_SF - COMPLETE INDEX DEFINITION
+-- =============================================
+
+-- --------------------------------------------
+-- 1. PRIMARY KEY / CLUSTERED INDEX
+-- Composite key: CO_ID + POL_ID + MTHV_EFF_DT_NUM + CVG_NUM
+-- Urutan kolom penting: selectivity tinggi di depan
+-- --------------------------------------------
+ALTER TABLE DWT_TUHCO_SF
+ADD CONSTRAINT PK_DWT_TUHCO_SF
+    PRIMARY KEY CLUSTERED (CO_ID, POL_ID, MTHV_EFF_DT_NUM, CVG_NUM)
+    WITH (
+        DATA_COMPRESSION = PAGE,
+        SORT_IN_TEMPDB   = ON,
+        FILLFACTOR       = 90,      -- 10% free space untuk UPDATE
+        MAXDOP           = 8
+    );
+GO
+
+-- --------------------------------------------
+-- 2. NC INDEX: DELTA DETECTION
+-- Dipakai Phase 2 SP: WHERE F.RowHash <> S.RowHash
+-- Kolom tipis → scan cepat untuk 20jt row
+-- --------------------------------------------
+CREATE NONCLUSTERED INDEX IX_DWT_TUHCO_SF_Hash
+ON DWT_TUHCO_SF (CO_ID, POL_ID, MTHV_EFF_DT_NUM, CVG_NUM)
+INCLUDE (RowHash)
+WITH (
+    DATA_COMPRESSION = PAGE,
+    SORT_IN_TEMPDB   = ON,
+    FILLFACTOR       = 95,          -- jarang di-update strukturnya
+    MAXDOP           = 8
+);
+GO
+
+-- --------------------------------------------
+-- 3. NC INDEX: LOOKUP BY POL_ID
+-- Query: SELECT ... WHERE POL_ID = '...'
+-- INCLUDE semua kolom amount → covering index
+-- (tidak perlu key lookup ke clustered)
+-- --------------------------------------------
+CREATE NONCLUSTERED INDEX IX_DWT_TUHCO_SF_PolID
+ON DWT_TUHCO_SF (POL_ID)
+INCLUDE (
+    CO_ID,
+    MTHV_EFF_DT_NUM,
+    CVG_NUM,
+    CVG_SUM_INS_AMT,
+    MTHV_CVG_NAR_AMT,
+    CVG_GUAR_COI_AMT,
+    STD_MORT_CHRG_AMT,
+    CVG_BNFT_CHRG_AMT,
+    SSTD_MORT_CHRG_AMT,
+    CVG_PERI_LOAD_AMT,
+    MTHV_CVG_SHRT_AMT
+)
+WITH (
+    DATA_COMPRESSION = PAGE,
+    SORT_IN_TEMPDB   = ON,
+    FILLFACTOR       = 90,
+    MAXDOP           = 8
+);
+GO
+
+-- --------------------------------------------
+-- 4. NC INDEX: RANGE SCAN BY TANGGAL
+-- Query: WHERE MTHV_EFF_DT_NUM BETWEEN 20240101 AND 20241231
+-- Untuk reporting bulanan / tahunan
+-- --------------------------------------------
+CREATE NONCLUSTERED INDEX IX_DWT_TUHCO_SF_EffDt
+ON DWT_TUHCO_SF (MTHV_EFF_DT_NUM, CO_ID)
+INCLUDE (
+    POL_ID,
+    CVG_NUM,
+    CVG_SUM_INS_AMT,
+    MTHV_CVG_NAR_AMT,
+    CVG_GUAR_COI_AMT,
+    STD_MORT_CHRG_AMT,
+    CVG_BNFT_CHRG_AMT
+)
+WITH (
+    DATA_COMPRESSION = PAGE,
+    SORT_IN_TEMPDB   = ON,
+    FILLFACTOR       = 95,
+    MAXDOP           = 8
+);
+GO
+
+-- --------------------------------------------
+-- 5. NC INDEX: LOOKUP BY CO_ID + CVG_NUM
+-- Query multi-company atau per coverage type
+-- --------------------------------------------
+CREATE NONCLUSTERED INDEX IX_DWT_TUHCO_SF_CoCvg
+ON DWT_TUHCO_SF (CO_ID, CVG_NUM)
+INCLUDE (
+    POL_ID,
+    MTHV_EFF_DT_NUM,
+    CVG_SUM_INS_AMT,
+    MTHV_CVG_SHRT_AMT
+)
+WITH (
+    DATA_COMPRESSION = PAGE,
+    SORT_IN_TEMPDB   = ON,
+    FILLFACTOR       = 90,
+    MAXDOP           = 8
+);
+GO
+
+-- =============================================
+-- VERIFIKASI SEMUA INDEX
+-- =============================================
+SELECT
+    i.name                                          AS IndexName,
+    i.type_desc                                     AS Type,
+    i.is_primary_key                                AS IsPK,
+    i.is_disabled                                   AS IsDisabled,
+    p.data_compression_desc                         AS Compression,
+    i.fill_factor                                   AS FillFactor,
+    -- Key columns
+    STRING_AGG(
+        CASE WHEN ic.is_included_column = 0 
+             THEN c.name END, ', ')
+        WITHIN GROUP (ORDER BY ic.key_ordinal)      AS KeyColumns,
+    -- Include columns
+    STRING_AGG(
+        CASE WHEN ic.is_included_column = 1 
+             THEN c.name END, ', ')
+        WITHIN GROUP (ORDER BY ic.index_column_id)  AS IncludeColumns,
+    -- Size
+    SUM(a.total_pages) * 8 / 1024                  AS SizeMB
+FROM sys.indexes           i
+JOIN sys.index_columns     ic ON ic.object_id = i.object_id
+                              AND ic.index_id  = i.index_id
+JOIN sys.columns           c  ON c.object_id  = ic.object_id
+                              AND c.column_id  = ic.column_id
+JOIN sys.partitions        p  ON p.object_id  = i.object_id
+                              AND p.index_id  = i.index_id
+JOIN sys.allocation_units  a  ON a.container_id = p.partition_id
+WHERE i.object_id = OBJECT_ID('DWT_TUHCO_SF')
+  AND i.type > 0
+GROUP BY i.name, i.type_desc, i.is_primary_key,
+         i.is_disabled, p.data_compression_desc,
+         i.fill_factor, i.index_id
+ORDER BY i.index_id;
+GO
