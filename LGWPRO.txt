@@ -1,0 +1,114 @@
+Arsitektur Umum
+Alurnya melibatkan tiga lapisan utama: Client → Light Gateway (LGW) → Core API → Data Source. Client mengirim request dengan Bearer Token (Okta JWT) ke LGW, kemudian LGW memvalidasi token tersebut sebelum meneruskan request ke Core API untuk mengambil data.
+
+text
+[Client]
+     |
+     | Authorization: Bearer <Okta JWT Token>
+     ▼
+[Light Gateway (LGW)]
+     |-- 1. Intercept Request
+     |-- 2. Validasi Token Okta (Local/Remote)
+     |-- 3. Forward Request + Token ke Core API
+     ▼
+[Core API]
+     |-- 4. Re-validasi Token (optional)
+     |-- 5. Query Database / Business Logic
+     ▼
+[Response → LGW → Client]
+
+
+Jawabannya: Ya, bisa mengganggu — tapi seberapa besar dampaknya tergantung pada arsitektur dan konfigurasi LGW kamu. Berikut penjelasan lengkapnya:
+
+Mengapa Bisa Mengganggu?
+LGW secara default menggunakan model buffering — artinya seluruh response dari Core API di-buffer di memori LGW sebelum dikirim ke client. Jika satu request mengambil data besar (misal jutaan row dari SQL Server), maka:
+​
+
+Memory LGW terpakai besar untuk menampung payload
+
+Thread/connection pool terkunci selama proses berlangsung
+
+Request lain terhambat jika thread pool habis (thread starvation)
+
+Timeout bisa terpicu jika response melebihi batas waktu LGW
+​
+
+Faktor yang Memperparah
+Synchronous blocking — jika LGW tidak async, satu request besar memblokir thread
+
+Payload limit — API Gateway umumnya punya limit payload (misal 10 MB)
+​
+
+Timeout limit — default timeout 29 detik, query besar bisa melebihi ini
+​
+
+Tidak ada pagination — mengambil semua data sekaligus tanpa batasan halaman
+​
+
+Solusi yang Direkomendasikan
+1. Pagination (Paling Umum)
+Pisahkan request data besar menjadi beberapa halaman kecil. Ini paling efektif untuk kasus seperti datamu yang jutaan row:
+
+csharp
+// Core API - Endpoint dengan pagination
+[HttpGet("data")]
+public async Task<IActionResult> GetData(int page = 1, int pageSize = 1000)
+{
+    var data = await _db.QueryAsync(
+        "SELECT * FROM DWT_TUHCO ORDER BY ID 
+         OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY",
+        new { Offset = (page - 1) * pageSize, PageSize = pageSize }
+    );
+    return Ok(new { page, pageSize, data });
+}
+2. Response Streaming
+LGW meneruskan data ke client secara incremental tanpa buffer penuh, sehingga memory LGW tidak meledak:
+
+csharp
+// LGW Forward dengan Streaming
+public async Task StreamFromCoreApi(HttpContext context, string coreApiUrl)
+{
+    using var httpClient = new HttpClient();
+    httpClient.Timeout = TimeSpan.FromMinutes(15); // extended timeout
+
+    using var response = await httpClient.GetAsync(
+        coreApiUrl, HttpCompletionOption.ResponseHeadersRead); // <-- kunci streaming
+
+    context.Response.ContentType = "application/json";
+    await response.Content.CopyToAsync(context.Response.Body); // pipe langsung
+}
+3. Async Queue / Background Job
+Untuk data sangat besar (5M+ row), jangan ambil via LGW synchronous. Gunakan pola request-then-poll:
+
+text
+Client → LGW → Core API → [Trigger Background Job]
+                              ↓
+                         Job selesai → simpan ke temp storage
+                              ↓
+Client polling GET /job/{id}/status → ambil hasil saat ready
+Ini cocok dengan pola ETL dan scheduled job yang sudah kamu gunakan.
+​
+
+4. Throttling & Rate Limiting di LGW
+Batasi concurrent request berat agar tidak menghabiskan semua resource:
+​
+
+csharp
+// Batasi endpoint berat
+services.AddRateLimiter(options => {
+    options.AddFixedWindowLimiter("heavy-endpoint", opt => {
+        opt.PermitLimit = 3;        // max 3 request besar bersamaan
+        opt.Window = TimeSpan.FromSeconds(10);
+        opt.QueueLimit = 5;         // antrian max 5
+    });
+});
+Perbandingan Strategi
+Strategi	Cocok Untuk	Dampak ke LGW
+Pagination	Data tabular, laporan	Rendah ✅
+Streaming	File besar, real-time	Rendah ✅
+Background Job	Export masif (5M+ row)	Tidak ada ✅✅
+Sync tanpa optimasi	—	Tinggi ❌
+Untuk kasus ETL dan data warehouse yang kamu kelola, pola Background Job + Polling adalah yang paling aman agar proses LGW lainnya tidak terganggu sama sekali.
+
+
+Bottleneck artinya hambatan atau kemacetan pada suatu sistem yang menyebabkan proses secara keseluruhan menjadi lambat
