@@ -1,0 +1,173 @@
+CREATE OR ALTER PROCEDURE usp_MigrateTUHCO_UltraFast
+    @BatchSize   INT = 500000,   -- tuning: bisa 250k s/d 1M
+    @MaxDOP      INT = 8
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    -- READ UNCOMMITTED untuk baca source, hindari lock contention
+    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+    DECLARE @StartTime   DATETIME2(3) = SYSDATETIME();
+    DECLARE @StepTime    DATETIME2(3);
+    DECLARE @RowsAffected BIGINT;
+    DECLARE @TotalMerge   BIGINT = 0;
+    DECLARE @TotalLoad    BIGINT = 0;
+
+    /* ============================================================
+       PRE-CHECK: pastikan index kunci komposit ada di SI_TUHCO_SF
+       & DWT_TUHCO_SF sebelum proses → kalau belum ada, buat dulu
+       di luar SP ini (lihat catatan di bawah)
+       ============================================================ */
+
+    BEGIN TRY
+
+        /* ========================================================
+           PHASE 1: PARALLEL BATCH LOAD ke SI_TUHCO_SF
+           Trik: fetch sekaligus dengan OPENQUERY 1x,
+           tapi pakai TABLOCKX + minimal log
+           ======================================================== */
+        PRINT CONCAT('[', CONVERT(VARCHAR,SYSDATETIME(),121), '] Phase 1: Refresh staging SI_TUHCO_SF...');
+        SET @StepTime = SYSDATETIME();
+
+        -- Drop & recreate staging sbg HEAP (tanpa index) untuk speed load
+        -- Atau: TRUNCATE saja kalau tabel sudah HEAP
+        TRUNCATE TABLE SI_TUHCO_SF;
+
+        -- Disable semua non-clustered index di staging sebelum bulk insert
+        -- (Jalankan ini manual atau via dynamic SQL kalau ada NC index):
+        -- ALTER INDEX ALL ON SI_TUHCO_SF DISABLE;
+        -- ALTER INDEX PK_SI_TUHCO_SF ON SI_TUHCO_SF REBUILD; -- kalau ada PK
+
+        INSERT INTO SI_TUHCO_SF WITH (TABLOCKX)
+        (
+            CO_ID, POL_ID, MTHV_EFF_DT_NUM, CVG_NUM,
+            CVG_SUM_INS_AMT, MTHV_CVG_NAR_AMT, CVG_GUAR_COI_AMT,
+            STD_MORT_CHRG_AMT, CVG_BNFT_CHRG_AMT, SSTD_MORT_CHRG_AMT,
+            CVG_PERI_LOAD_AMT, MTHV_CVG_SHRT_AMT
+        )
+        SELECT
+            CO_ID, POL_ID, MTHV_EFF_DT_NUM, CVG_NUM,
+            CVG_SUM_INS_AMT, MTHV_CVG_NAR_AMT, CVG_GUAR_COI_AMT,
+            STD_MORT_CHRG_AMT, CVG_BNFT_CHRG_AMT, SSTD_MORT_CHRG_AMT,
+            CVG_PERI_LOAD_AMT, MTHV_CVG_SHRT_AMT
+        FROM OPENQUERY([UDING602_SV80621],
+            'SELECT /*+ PARALLEL(t,8) */ 
+                CO_ID, POL_ID, MTHV_EFF_DT_NUM, CVG_NUM,
+                CVG_SUM_INS_AMT, MTHV_CVG_NAR_AMT, CVG_GUAR_COI_AMT,
+                STD_MORT_CHRG_AMT, CVG_BNFT_CHRG_AMT, SSTD_MORT_CHRG_AMT,
+                CVG_PERI_LOAD_AMT, MTHV_CVG_SHRT_AMT
+             FROM UDING602.TUHCO WITH UR'
+        )
+        OPTION (MAXDOP 8, RECOMPILE);
+        -- Catatan: OPENQUERY itu single-threaded di SQL Server sisi penerima.
+        -- Paralel di atas = hint ke DB2 source. Untuk true parallel di MSSQL,
+        -- perlu BCP / SSIS / external loader (lihat opsi alternatif di bawah)
+
+        SET @TotalLoad = @@ROWCOUNT;
+        PRINT CONCAT('[', CONVERT(VARCHAR,SYSDATETIME(),121), '] Staging loaded: ',
+                     FORMAT(@TotalLoad,'N0'), ' rows in ',
+                     DATEDIFF(SECOND, @StepTime, SYSDATETIME()), 's');
+
+        -- Rebuild index staging SETELAH load (lebih cepat daripada maintain saat insert)
+        -- ALTER INDEX ALL ON SI_TUHCO_SF REBUILD WITH (SORT_IN_TEMPDB = ON, MAXDOP = 8);
+
+        /* ========================================================
+           PHASE 2+3: SINGLE-PASS MERGE (Update + Insert sekaligus)
+           Jauh lebih cepat dari UPDATE terpisah + INSERT NOT EXISTS
+           ======================================================== */
+        PRINT CONCAT('[', CONVERT(VARCHAR,SYSDATETIME(),121), '] Phase 2+3: MERGE into DWT_TUHCO_SF...');
+        SET @StepTime = SYSDATETIME();
+
+        MERGE DWT_TUHCO_SF WITH (TABLOCK) AS F
+        USING (
+            SELECT
+                CO_ID, POL_ID, MTHV_EFF_DT_NUM, CVG_NUM,
+                CVG_SUM_INS_AMT, MTHV_CVG_NAR_AMT, CVG_GUAR_COI_AMT,
+                STD_MORT_CHRG_AMT, CVG_BNFT_CHRG_AMT, SSTD_MORT_CHRG_AMT,
+                CVG_PERI_LOAD_AMT, MTHV_CVG_SHRT_AMT
+            FROM SI_TUHCO_SF
+        ) AS S
+        ON  F.CO_ID           = S.CO_ID
+        AND F.POL_ID          = S.POL_ID
+        AND F.MTHV_EFF_DT_NUM = S.MTHV_EFF_DT_NUM
+        AND F.CVG_NUM         = S.CVG_NUM
+
+        WHEN MATCHED AND (
+            -- Hanya update kalau ada perubahan (hindari unnecessary dirty pages)
+            F.CVG_SUM_INS_AMT    <> S.CVG_SUM_INS_AMT OR
+            F.MTHV_CVG_NAR_AMT   <> S.MTHV_CVG_NAR_AMT OR
+            F.CVG_GUAR_COI_AMT   <> S.CVG_GUAR_COI_AMT OR
+            F.STD_MORT_CHRG_AMT  <> S.STD_MORT_CHRG_AMT OR
+            F.CVG_BNFT_CHRG_AMT  <> S.CVG_BNFT_CHRG_AMT OR
+            F.SSTD_MORT_CHRG_AMT <> S.SSTD_MORT_CHRG_AMT OR
+            F.CVG_PERI_LOAD_AMT  <> S.CVG_PERI_LOAD_AMT OR
+            F.MTHV_CVG_SHRT_AMT  <> S.MTHV_CVG_SHRT_AMT
+        ) THEN
+            UPDATE SET
+                F.CVG_SUM_INS_AMT    = S.CVG_SUM_INS_AMT,
+                F.MTHV_CVG_NAR_AMT   = S.MTHV_CVG_NAR_AMT,
+                F.CVG_GUAR_COI_AMT   = S.CVG_GUAR_COI_AMT,
+                F.STD_MORT_CHRG_AMT  = S.STD_MORT_CHRG_AMT,
+                F.CVG_BNFT_CHRG_AMT  = S.CVG_BNFT_CHRG_AMT,
+                F.SSTD_MORT_CHRG_AMT = S.SSTD_MORT_CHRG_AMT,
+                F.CVG_PERI_LOAD_AMT  = S.CVG_PERI_LOAD_AMT,
+                F.MTHV_CVG_SHRT_AMT  = S.MTHV_CVG_SHRT_AMT
+
+        WHEN NOT MATCHED BY TARGET THEN
+            INSERT (
+                CO_ID, POL_ID, MTHV_EFF_DT_NUM, CVG_NUM,
+                CVG_SUM_INS_AMT, MTHV_CVG_NAR_AMT, CVG_GUAR_COI_AMT,
+                STD_MORT_CHRG_AMT, CVG_BNFT_CHRG_AMT, SSTD_MORT_CHRG_AMT,
+                CVG_PERI_LOAD_AMT, MTHV_CVG_SHRT_AMT
+            )
+            VALUES (
+                S.CO_ID, S.POL_ID, S.MTHV_EFF_DT_NUM, S.CVG_NUM,
+                S.CVG_SUM_INS_AMT, S.MTHV_CVG_NAR_AMT, S.CVG_GUAR_COI_AMT,
+                S.STD_MORT_CHRG_AMT, S.CVG_BNFT_CHRG_AMT, S.SSTD_MORT_CHRG_AMT,
+                S.CVG_PERI_LOAD_AMT, S.MTHV_CVG_SHRT_AMT
+            )
+        OPTION (MAXDOP 8, RECOMPILE, MERGE JOIN);
+        -- MERGE JOIN hint: paksa hash/merge join, hindari nested loop O(n²)
+
+        SET @TotalMerge = @@ROWCOUNT;
+        PRINT CONCAT('[', CONVERT(VARCHAR,SYSDATETIME(),121), '] MERGE done: ',
+                     FORMAT(@TotalMerge,'N0'), ' rows in ',
+                     DATEDIFF(SECOND, @StepTime, SYSDATETIME()), 's');
+
+        /* ========================================================
+           SUMMARY
+           ======================================================== */
+        DECLARE @TotalSec INT = DATEDIFF(SECOND, @StartTime, SYSDATETIME());
+        PRINT '';
+        PRINT REPLICATE('=',50);
+        PRINT 'TOTAL DURATION : ' + CAST(@TotalSec/60 AS VARCHAR) + 'm ' + CAST(@TotalSec%60 AS VARCHAR) + 's';
+        PRINT 'STAGING ROWS   : ' + FORMAT(@TotalLoad,'N0');
+        PRINT 'MERGE ROWS     : ' + FORMAT(@TotalMerge,'N0');
+        IF @TotalSec > 0
+            PRINT 'THROUGHPUT     : ' + FORMAT((@TotalLoad*1.0)/@TotalSec,'N0') + ' rows/sec';
+        PRINT REPLICATE('=',50);
+
+        IF @TotalSec <= 300
+            PRINT '✅ TARGET 5 MENIT TERCAPAI!';
+        ELSE
+            PRINT '⚠️ Melebihi target. Lihat catatan tuning di bawah.';
+
+    END TRY
+    BEGIN CATCH
+        PRINT 'ERROR at line ' + CAST(ERROR_LINE() AS VARCHAR) + ': ' + ERROR_MESSAGE();
+        THROW;
+    END CATCH
+END;
+GO
+
+
+-- Di SI_TUHCO_SF: Clustered index pada composite key
+CREATE CLUSTERED INDEX CIX_SI_TUHCO_SF_KEY
+ON SI_TUHCO_SF (CO_ID, POL_ID, MTHV_EFF_DT_NUM, CVG_NUM);
+
+-- Di DWT_TUHCO_SF: Clustered index pada composite key (sama)
+-- Kalau belum ada atau pakai HEAP, MERGE akan sangat lambat
+CREATE CLUSTERED INDEX CIX_DWT_TUHCO_SF_KEY
+ON DWT_TUHCO_SF (CO_ID, POL_ID, MTHV_EFF_DT_NUM, CVG_NUM);
+
