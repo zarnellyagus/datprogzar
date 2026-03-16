@@ -1,0 +1,139 @@
+[HttpGet("return-sms/{policyId}")]
+public async Task<IActionResult> GetReturnSms(string policyId)
+{
+    var result = await _policyService.GetReturnSmsAsync(policyId);
+    return Ok(result);
+}
+
+[HttpGet("resend-epolicy/{policyId}")]
+public async Task<IActionResult> GetResendEPolicy(string policyId)
+{
+    var result = await _policyService.GetResendEPolicyAsync(policyId);
+    return Ok(result);
+}
+
+[HttpGet("resend-summary/{policyId}")]
+public async Task<IActionResult> GetResendPolicySummary(string policyId)
+{
+    var result = await _policyService.GetResendPolicySummaryAsync(policyId);
+    return Ok(result);
+}
+
+
+public interface IPolicyService
+{
+    Task<PagedResult<ConsolidatePolicy>> GetConsolidatePoliciesAsync(string? policyId, string? appNo, int pageNumber, int pageSize);
+    Task<PolicyDetail> GetPolicyDetailAsync(string policyId);
+    Task<List<EPolicyStatus>> GetEPolicyStatusAsync(string policyId);
+    Task<List<PolicySummary>> GetPolicySummaryAsync(string policyId);
+    Task<List<ReturnSms>> GetReturnSmsAsync(string policyId);       // ✅ Tambah
+    Task<List<EPolicyStatus>> GetResendEPolicyAsync(string policyId); // ✅ Tambah
+    Task<List<PolicySummary>> GetResendPolicySummaryAsync(string policyId); // ✅ Tambah
+}
+
+policy.service.ts
+import { Injectable } from '@angular/core';
+import { HttpClient, HttpParams } from '@angular/common/http';
+import { Observable } from 'rxjs';
+
+export interface ConsolidatePolicy {
+  companyID: string;
+  policyID: string;
+  appNo: string;
+  ownerName: string;
+  issuedDate: string | Date | null;
+}
+
+export interface PolicyInfo {
+  spajNo: string;
+  policyNo: string;
+  clientID: string;
+  ownerName: string;
+  insuredName: string;
+  planName: string;
+  issuedDate: string | Date | null;
+  agentId: string;
+  branchName: string;
+  addressName: string;
+  email: string;
+  tlpNum: string;
+  ttp: string;
+  receiveDate: string;
+}
+
+export interface EPolicy {
+  ePolSource: string;
+  statusDate: string | Date | null;
+  statusDate2: string;
+}
+
+export interface PolicySummary {
+  polSumPolicyID: string;
+  polSumPickUpDate: string | Date | null;
+  polSumStatusDate: string | Date | null;
+  polSumStatus: string;
+  polSumReceiver: string;
+  polSumRelation: string;
+  polSumReturn: string;
+  polSumResiNo: string;
+  polSumCourier: string;
+}
+
+export interface ReturnSms {          // ✅ Pastikan ada
+  rsSendDate: string | Date | null;
+  rsStatus: string;
+}
+
+export interface PaginatedResponse<T> {
+  data: T[];
+  totalCount: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+@Injectable({ providedIn: 'root' })
+export class PolicyService {
+  private apiUrl = 'https://localhost:7147/api/policy'; // ✅ Sesuaikan port
+
+  constructor(private http: HttpClient) {}
+
+  getConsolidatePolicy(
+    policyId?: string, appNo?: string,
+    page: number = 1, pageSize: number = 10
+  ): Observable<PaginatedResponse<ConsolidatePolicy>> {
+    let params = new HttpParams()
+      .set('page', page.toString())
+      .set('pageSize', pageSize.toString());
+    if (policyId) params = params.set('policyId', policyId);
+    if (appNo) params = params.set('appNo', appNo);
+    return this.http.get<PaginatedResponse<ConsolidatePolicy>>(
+      `${this.apiUrl}/consolidate`, { params }
+    );
+  }
+
+  getPolicyInfo(policyId: string): Observable<PolicyInfo> {
+    return this.http.get<PolicyInfo>(`${this.apiUrl}/info/${policyId}`);
+  }
+
+  getEPolicy(policyId: string): Observable<EPolicy[]> {
+    return this.http.get<EPolicy[]>(`${this.apiUrl}/epolicy/${policyId}`);
+  }
+
+  getPolicySummary(policyId: string): Observable<PolicySummary[]> {
+    return this.http.get<PolicySummary[]>(`${this.apiUrl}/summary/${policyId}`);
+  }
+
+  // ✅ TAMBAHAN BARU
+  getReturnSms(policyId: string): Observable<ReturnSms[]> {
+    return this.http.get<ReturnSms[]>(`${this.apiUrl}/return-sms/${policyId}`);
+  }
+
+  getResendEPolicy(policyId: string): Observable<EPolicy[]> {
+    return this.http.get<EPolicy[]>(`${this.apiUrl}/resend-epolicy/${policyId}`);
+  }
+
+  getResendPolicySummary(policyId: string): Observable<PolicySummary[]> {
+    return this.http.get<PolicySummary[]>(`${this.apiUrl}/resend-summary/${policyId}`);
+  }
+}
