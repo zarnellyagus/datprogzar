@@ -1,0 +1,195 @@
+<div class="login-wrapper">
+  <!-- Left Panel: Background Image -->
+  <div class="left-panel">
+    <!-- Overlay gelap supaya teks tetap terbaca -->
+    <div class="left-overlay"></div>
+
+    <div class="brand">
+      <span class="brand-icon">&#9678;</span>
+      <span class="brand-name">COMPANY NAME</span>
+    </div>
+    <div class="left-content">
+      <p class="subtitle">Nice to see you again</p>
+      <h1 class="title">WELCOME BACK</h1>
+      <hr class="divider" />
+      <p class="description">
+        Lorem ipsum dolor sit amet, consectetuer adipiscing alit, sed diam
+        nonummy nibh euismod tincidunt ut laoreet dolore magna aliquam erat
+        volutpat. Ut wisi enim ad minim veniam, quis nos.
+      </p>
+    </div>
+  </div>
+
+  <!-- Right Panel (tidak berubah) -->
+  <div class="right-panel">
+    <div class="form-box">
+      <div class="form-logo text-center mb-3">
+        <img src="assets/images/logo.png" alt="Company Logo" class="logo-img" />
+      </div>
+      <h2 class="form-title">Login Account</h2>
+      <p class="form-subtitle">
+        Lorem ipsum dolor sit amet, consectetuer adipiscing alit, sed diam
+        nonummy nibh euismod tincidunt ut laoreet dolore magna aliquam erat
+        volutpat. Ut wisi enim ad minim veniam, quis nos.
+      </p>
+      <form [formGroup]="loginForm" (ngSubmit)="onLogin()" novalidate>
+        <div class="input-group-custom">
+          <input id="username" type="text" class="form-control custom-input"
+            formControlName="username" placeholder="Email ID"
+            [class.is-invalid]="loginForm.get('username')?.touched && loginForm.get('username')?.invalid" />
+          <div class="invalid-feedback"
+            *ngIf="loginForm.get('username')?.touched && loginForm.get('username')?.invalid">
+            Username wajib diisi
+          </div>
+        </div>
+        <div class="input-group-custom">
+          <input id="password" type="password" class="form-control custom-input"
+            formControlName="password" placeholder="Password"
+            [class.is-invalid]="loginForm.get('password')?.touched && loginForm.get('password')?.invalid" />
+          <div class="invalid-feedback"
+            *ngIf="loginForm.get('password')?.touched && loginForm.get('password')?.invalid">
+            Password minimal 3 karakter
+          </div>
+        </div>
+        <div class="input-group-custom">
+          <select id="companyID" class="form-select custom-input"
+            formControlName="companyID"
+            [class.is-invalid]="loginForm.get('companyID')?.touched && loginForm.get('companyID')?.invalid">
+            <option value="">-- Pilih Company --</option>
+            <option *ngFor="let company of companies" [value]="company.companyID">
+              {{ company.companyName }}
+            </option>
+          </select>
+          <div class="invalid-feedback"
+            *ngIf="loginForm.get('companyID')?.touched && loginForm.get('companyID')?.invalid">
+            Company wajib dipilih
+          </div>
+        </div>
+        <div class="form-options">
+          <label class="keep-signed">
+            <span class="check-icon">&#10003;</span> Keep me signed in
+          </label>
+          <a href="#" class="already-member">Already a member?</a>
+        </div>
+        <div *ngIf="errorMessage" class="alert alert-danger alert-dismissible fade show" role="alert">
+          {{ errorMessage }}
+          <button type="button" class="btn-close" (click)="errorMessage = ''"></button>
+        </div>
+        <button type="submit" class="btn-subscribe" [disabled]="loginForm.invalid || isLoading">
+          <span *ngIf="isLoading" class="spinner-border spinner-border-sm me-2" role="status"></span>
+          {{ isLoading ? 'LOGGING IN...' : 'SUBSCRIBE' }}
+        </button>
+      </form>
+    </div>
+  </div>
+</div>
+
+
+.login-wrapper {
+  display: flex;
+  min-height: 100vh;
+}
+
+// =====================
+// LEFT PANEL
+// =====================
+.left-panel {
+  position: relative;
+  width: 50%;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 2.5rem;
+  overflow: hidden;
+
+  // ✅ Ganti path sesuai lokasi gambar kamu
+  background-image: url('/assets/images/login-bg.jpg');
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+
+  // Semua child harus di atas overlay
+  > *:not(.left-overlay) {
+    position: relative;
+    z-index: 2;
+  }
+}
+
+// ✅ Overlay gelap semi-transparan
+.left-overlay {
+  position: absolute;
+  inset: 0; // top:0, right:0, bottom:0, left:0
+  background: linear-gradient(
+    160deg,
+    rgba(0, 0, 0, 0.55) 0%,
+    rgba(0, 30, 80, 0.70) 100%
+  );
+  z-index: 1;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: #fff;
+
+  .brand-icon {
+    font-size: 1.5rem;
+  }
+
+  .brand-name {
+    font-size: 1.1rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+}
+
+.left-content {
+  color: #fff;
+
+  .subtitle {
+    font-size: 0.95rem;
+    opacity: 0.8;
+    margin-bottom: 0.4rem;
+  }
+
+  .title {
+    font-size: 2.4rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    line-height: 1.1;
+  }
+
+  .divider {
+    border-color: rgba(255, 255, 255, 0.4);
+    margin: 1rem 0;
+  }
+
+  .description {
+    font-size: 0.875rem;
+    opacity: 0.75;
+    line-height: 1.6;
+  }
+}
+
+// =====================
+// RIGHT PANEL (unchanged)
+// =====================
+.right-panel {
+  width: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #fff;
+  padding: 2rem;
+}
+
+// Responsive
+@media (max-width: 768px) {
+  .left-panel {
+    display: none; // sembunyikan di mobile
+  }
+  .right-panel {
+    width: 100%;
+  }
+}
