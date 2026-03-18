@@ -1,0 +1,15 @@
+{
+  "/api": {
+    "target": "http://sv80252:8061",
+    "secure": false,
+    "changeOrigin": true,
+    "logLevel": "debug"
+  }
+}
+
+"serve": {
+  "builder": "@angular-devkit/build-angular:dev-server",
+  "options": {
+    "proxyConfig": "proxy.conf.json"
+  }
+}
